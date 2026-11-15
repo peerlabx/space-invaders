@@ -1,0 +1,266 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Space Invaders</title>
+<style>
+  html, body {
+    margin: 0; height: 100%;
+    background: radial-gradient(circle at 50% 30%, #101a2c, #04060b 70%);
+    display: flex; align-items: center; justify-content: center;
+  }
+  canvas {
+    background: #05070d;
+    border: 2px solid #1d2b45;
+    border-radius: 8px;
+    box-shadow: 0 0 60px rgba(60, 130, 255, .15);
+    max-width: 96vw; max-height: 92vh;
+  }
+</style>
+</head>
+<body>
+<canvas id="game" width="640" height="480"></canvas>
+<script>
+(() => {
+  "use strict";
+
+  // ---------- setup ----------
+  const canvas = document.getElementById("game");
+  const ctx = canvas.getContext("2d");
+  const W = canvas.width;
+  const H = canvas.height;
+
+  const keys = new Set();
+  addEventListener("keydown", e => {
+    if (["ArrowLeft", "ArrowRight", "Space"].includes(e.code)) e.preventDefault();
+    if (e.code === "Enter" && state !== "playing") reset();
+    keys.add(e.code);
+  });
+  addEventListener("keyup", e => keys.delete(e.code));
+  addEventListener("blur", () => keys.clear());
+
+  // ---------- tuning ----------
+  const PLAYER_W = 40, PLAYER_H = 20, PLAYER_SPEED = 280;
+  const SHOT_COOL = 0.35, BULLET_SPEED = 430, ENEMY_BULLET_SPEED = 175;
+  const ROWS = 5, COLS = 8, INV_W = 32, INV_H = 24, GAP_X = 14, GAP_Y = 14;
+  const TOTAL = ROWS * COLS;
+  const FLEET_LEFT = Math.round((W - (COLS * INV_W + (COLS - 1) * GAP_X)) / 2);
+  const FLEET_TOP = 64;
+
+  // Classic 11x8 invader bitmap, one colour per row.
+  const COLORS = ["#ff6b6b", "#ffa94d", "#ffe066", "#8ce99a", "#74c0fc"];
+  const SPRITE = [
+    "..X.....X..",
+    "...X...X...",
+    "..XXXXXXX..",
+    ".XX.XXX.XX.",
+    "XXXXXXXXXXX",
+    "X.XXXXXXX.X",
+    "X.X.....X.X",
+    "...XX.XX..."
+  ];
+
+  function makeSprite(color) {
+    const c = document.createElement("canvas");
+    c.width = INV_W;
+    c.height = INV_H;
+    const g = c.getContext("2d");
+    const sx = INV_W / SPRITE[0].length;
+    const sy = INV_H / SPRITE.length;
+    g.fillStyle = color;
+    SPRITE.forEach((row, y) => {
+      [...row].forEach((ch, x) => {
+        if (ch === "X") g.fillRect(Math.floor(x * sx), Math.floor(y * sy), Math.ceil(sx), Math.ceil(sy));
+      });
+    });
+    return c;
+  }
+
+  const sprites = COLORS.map(makeSprite);
+  const stars = Array.from({ length: 70 }, () => ({
+    x: Math.random() * W, y: Math.random() * H, r: Math.random() * 1.5 + 0.5
+  }));
+
+  // ---------- state ----------
+  let state, player, bullets, eBullets, invaders, fleet, score, lives;
+
+  function reset() {
+    state = "playing";
+    score = 0;
+    lives = 3;
+    player = { x: W / 2 - PLAYER_W / 2, y: H - 46, w: PLAYER_W, h: PLAYER_H, cool: 0, inv: 0 };
+    bullets = [];
+    eBullets = [];
+    invaders = [];
+    for (let r = 0; r < ROWS; r++) {
+      for (let c = 0; c < COLS; c++) {
+        invaders.push({
+          x: FLEET_LEFT + c * (INV_W + GAP_X),
+          y: FLEET_TOP + r * (INV_H + GAP_Y),
+          w: INV_W, h: INV_H, col: c, row: r, alive: true
+        });
+      }
+    }
+    fleet = { dir: 1, timer: 0, shootTimer: 1 };
+  }
+
+  const hit = (a, b) =>
+    a.x < b.x + b.w && a.x + a.w > b.x && a.y < b.y + b.h && a.y + a.h > b.y;
+
+  // ---------- update ----------
+  function update(dt) {
+    if (state !== "playing") return;
+
+    // player movement + shooting
+    if (keys.has("ArrowLeft") || keys.has("KeyA")) player.x -= PLAYER_SPEED * dt;
+    if (keys.has("ArrowRight") || keys.has("KeyD")) player.x += PLAYER_SPEED * dt;
+    player.x = Math.max(10, Math.min(W - player.w - 10, player.x));
+    player.cool -= dt;
+    player.inv -= dt;
+    if (keys.has("Space") && player.cool <= 0) {
+      bullets.push({ x: player.x + player.w / 2 - 2, y: player.y - 12, w: 4, h: 12 });
+      player.cool = SHOT_COOL;
+    }
+
+    for (const b of bullets) b.y -= BULLET_SPEED * dt;
+    for (const b of eBullets) b.y += ENEMY_BULLET_SPEED * dt;
+
+    const alive = invaders.filter(i => i.alive);
+    if (alive.length === 0) { state = "won"; return; }
+
+    // fleet marches in steps; it gets faster as invaders die
+    const progress = 1 - alive.length / TOTAL;
+    fleet.timer -= dt;
+    if (fleet.timer <= 0) {
+      fleet.timer = 0.55 - 0.45 * progress;
+      const minX = Math.min(...alive.map(i => i.x));
+      const maxX = Math.max(...alive.map(i => i.x + i.w));
+      const edge = (fleet.dir > 0 && maxX + 8 > W - 10) || (fleet.dir < 0 && minX - 8 < 10);
+      if (edge) {
+        fleet.dir *= -1;
+        for (const i of alive) i.y += 14;
+      } else {
+        for (const i of alive) i.x += 8 * fleet.dir;
+      }
+      if (alive.some(i => i.y + i.h >= player.y)) { state = "lost"; return; }
+    }
+
+    // bottom-most invader of a random column fires
+    fleet.shootTimer -= dt;
+    if (fleet.shootTimer <= 0) {
+      fleet.shootTimer = Math.max(0.3, 1.1 - 0.8 * progress);
+      const shooters = [];
+      for (let c = 0; c < COLS; c++) {
+        let low = null;
+        for (const i of alive) if (i.col === c && (!low || i.y > low.y)) low = i;
+        if (low) shooters.push(low);
+      }
+      const s = shooters[Math.floor(Math.random() * shooters.length)];
+      eBullets.push({ x: s.x + s.w / 2 - 2, y: s.y + s.h, w: 4, h: 12 });
+    }
+
+    // player bullets vs invaders
+    for (const b of bullets) {
+      for (const i of invaders) {
+        if (i.alive && hit(b, i)) {
+          i.alive = false;
+          b.dead = true;
+          score += 10;
+          break;
+        }
+      }
+    }
+
+    // enemy bullets vs player
+    if (player.inv <= 0) {
+      for (const b of eBullets) {
+        if (hit(b, player)) {
+          lives -= 1;
+          eBullets = [];
+          player.inv = 1.5;
+          player.x = W / 2 - player.w / 2;
+          if (lives <= 0) state = "lost";
+          break;
+        }
+      }
+    }
+
+    bullets = bullets.filter(b => !b.dead && b.y > -20);
+    eBullets = eBullets.filter(b => !b.dead && b.y < H + 20);
+  }
+
+  // ---------- draw ----------
+  function drawPlayer() {
+    const { x, y, w, h } = player;
+    ctx.fillStyle = "#5ee7ff";
+    ctx.beginPath();
+    ctx.moveTo(x + w / 2, y);
+    ctx.lineTo(x + w, y + h - 4);
+    ctx.lineTo(x + w - 8, y + h);
+    ctx.lineTo(x + 8, y + h);
+    ctx.lineTo(x, y + h - 4);
+    ctx.closePath();
+    ctx.fill();
+    ctx.fillRect(x + w / 2 - 2, y + 4, 4, h - 2);
+  }
+
+  function draw() {
+    ctx.fillStyle = "#05070d";
+    ctx.fillRect(0, 0, W, H);
+
+    ctx.fillStyle = "#1b2a44";
+    for (const s of stars) ctx.fillRect(s.x, s.y, s.r, s.r);
+
+    for (const i of invaders) if (i.alive) ctx.drawImage(sprites[i.row], i.x, i.y);
+
+    ctx.fillStyle = "#5ee7ff";
+    for (const b of bullets) ctx.fillRect(b.x, b.y, b.w, b.h);
+    ctx.fillStyle = "#ff6b6b";
+    for (const b of eBullets) ctx.fillRect(b.x, b.y, b.w, b.h);
+
+    if (!(player.inv > 0 && Math.floor(player.inv * 10) % 2)) drawPlayer();
+
+    // HUD
+    ctx.font = "16px monospace";
+    ctx.fillStyle = "#8fb8e8";
+    ctx.textAlign = "left";
+    ctx.fillText("SCORE " + score, 16, 26);
+    ctx.textAlign = "right";
+    ctx.fillText("LIVES " + Math.max(0, lives), W - 16, 26);
+
+    if (state === "playing") {
+      ctx.textAlign = "center";
+      ctx.fillStyle = "#3c5677";
+      ctx.font = "13px monospace";
+      ctx.fillText("\u2190 \u2192 / A D  move      SPACE  shoot", W / 2, H - 10);
+    } else {
+      ctx.fillStyle = "rgba(3, 6, 12, 0.68)";
+      ctx.fillRect(0, 0, W, H);
+      ctx.textAlign = "center";
+      ctx.fillStyle = state === "won" ? "#8ce99a" : "#ff6b6b";
+      ctx.font = "bold 42px monospace";
+      ctx.fillText(state === "won" ? "YOU WIN!" : "GAME OVER", W / 2, H / 2 - 20);
+      ctx.fillStyle = "#c9d8ef";
+      ctx.font = "18px monospace";
+      ctx.fillText("SCORE " + score, W / 2, H / 2 + 20);
+      ctx.fillText("PRESS ENTER TO PLAY AGAIN", W / 2, H / 2 + 56);
+    }
+  }
+
+  // ---------- loop ----------
+  let last = performance.now();
+  function loop(now) {
+    const dt = Math.min(0.05, (now - last) / 1000);
+    last = now;
+    update(dt);
+    draw();
+    requestAnimationFrame(loop);
+  }
+
+  reset();
+  requestAnimationFrame(loop);
+})();
+</script>
+</body>
+</html>
